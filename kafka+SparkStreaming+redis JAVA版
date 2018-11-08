@@ -1,0 +1,99 @@
+package com.sunwayland.test;
+/**
+ * 其中需要导入spark的包,kafka的包,根据版本我导入的是spark-streaming-kafka-0-10_2.11-2.2.0的整合用的包,还有jedis包
+ */
+import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.common.serialization.StringDeserializer;
+import org.apache.spark.SparkConf;
+import org.apache.spark.api.java.JavaPairRDD;
+import org.apache.spark.api.java.JavaSparkContext;
+import org.apache.spark.api.java.function.PairFunction;
+import org.apache.spark.api.java.function.VoidFunction;
+import org.apache.spark.broadcast.Broadcast;
+import org.apache.spark.streaming.Durations;
+import org.apache.spark.streaming.api.java.JavaInputDStream;
+import org.apache.spark.streaming.api.java.JavaPairDStream;
+import org.apache.spark.streaming.api.java.JavaStreamingContext;
+import org.apache.spark.streaming.kafka010.*;
+import redis.clients.jedis.Jedis;
+import redis.clients.jedis.JedisPool;
+import redis.clients.jedis.JedisPoolConfig;
+import scala.Tuple2;
+
+import java.util.*;
+public class SparkStreaming4Kafka2Redis {
+    public static void main(String[] args){
+        SparkConf conf = new SparkConf().setAppName("test").setMaster("local");
+        JavaSparkContext javaSparkContext = new JavaSparkContext(conf);
+        JavaStreamingContext jssc = new JavaStreamingContext(javaSparkContext, Durations.seconds(1));
+
+        //连接redis的URL
+        final String host = "172.18.16.145";
+        //连接redis的port端口号
+        final int port = 6379;
+        //超时时间
+        final int timeout = 200;
+        //redis密码(如果设置了)
+        final String password = null;
+        //库的索引
+        final int database = 1;
+        
+        //连接配置 kafkaParams
+        HashMap<String, Object> kafkaParams = new HashMap<>();
+        kafkaParams.put("bootstrap.servers", "172.18.16.72:9092,172.18.16.73:9092,172.18.16.74:9092");
+        kafkaParams.put("key.deserializer", StringDeserializer.class);
+        kafkaParams.put("value.deserializer", StringDeserializer.class);
+        kafkaParams.put("group.id", "1");
+        kafkaParams.put("auto.offset.reset", "latest");
+        kafkaParams.put("enable.auto.commit", false);
+        //kafka的topics
+        Collection<String> topics = Arrays.asList("testtopic");
+        
+        //调用KafkaUtils.createDirectStream()方法,创建JavaInputDStream<ConsumerRecord<String, String>>
+        JavaInputDStream<ConsumerRecord<String, String>> stream = KafkaUtils.createDirectStream(jssc, LocationStrategies.PreferConsistent(), ConsumerStrategies.<String, String>Subscribe(topics, kafkaParams));
+        
+        //这里简单的增加一部转换,往下还可以写转换逻辑
+        JavaPairDStream<String, String> resultRDD = stream.mapToPair(new PairFunction<ConsumerRecord<String, String>, String, String>() {
+            private static final long serialVersionUID = 1L;
+            @Override
+            public Tuple2<String, String> call(ConsumerRecord<String, String> cr) throws Exception {
+                String[] split = cr.value().split(",");
+                return new Tuple2<>(split[0],cr.value());
+            }
+        });
+        
+        
+        resultRDD.foreachRDD(new VoidFunction<JavaPairRDD<String, String>>() {
+            @Override
+            public void call(JavaPairRDD<String, String> rdd) throws Exception {
+                rdd.foreachPartition(new VoidFunction<Iterator<Tuple2<String, String>>>() {
+                    @Override
+                    public void call(Iterator<Tuple2<String, String>> tuple2Iterator) throws Exception {
+                         
+                         //JedisPool要在类似foreachPartition这种xxxPartition算子的call方法中创建,否则执行会报错: task没有序列化
+                         JedisPoolConfig jedisPoolConfig = new JedisPoolConfig();
+                         //创建JedisPool
+                         JedisPool pool = new JedisPool(jedisPoolConfig,host,bport.value(),timeout,password,database);
+                         //通过pool.getResource()方法得到Jedis
+                         Jedis jedis = pool.getResource();
+                        while (tuple2Iterator.hasNext()){
+                            Tuple2<String, String> next = tuple2Iterator.next();
+                            //通过jedis.set往redis中写入数据(key,value格式)
+                            jedis.set(next._1,next._2 );
+                        }
+                            pool.returnResource(jedis);
+                    }
+                });
+            }
+        });
+        resultRDD.print();
+        jssc.start();
+        try {
+            jssc.awaitTermination();
+        } catch (InterruptedException e) {
+            e.printStackTrace();
+        }
+        jssc.close();
+
+    }
+}
